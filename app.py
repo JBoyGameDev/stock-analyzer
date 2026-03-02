@@ -192,8 +192,10 @@ def analyze_technicals(history):
     h["SMA20"] = ta.sma(h["Close"], length=20)
     h["SMA50"] = ta.sma(h["Close"], length=50)
     bb = ta.bbands(h["Close"], length=20)
-    h["BB_upper"] = bb["BBU_20_2.0"]
-    h["BB_lower"] = bb["BBL_20_2.0"]
+    bb_upper_col = [c for c in bb.columns if c.startswith("BBU")]
+    bb_lower_col = [c for c in bb.columns if c.startswith("BBL")]
+    h["BB_upper"] = bb[bb_upper_col[0]] if bb_upper_col else np.nan
+    h["BB_lower"] = bb[bb_lower_col[0]] if bb_lower_col else np.nan
     h["OBV"] = ta.obv(h["Close"], h["Volume"])
     h["WILLR"] = ta.willr(h["High"], h["Low"], h["Close"], length=14)
     latest = h.iloc[-1]
