@@ -12,7 +12,6 @@ from datetime import datetime
 
 load_dotenv()
 
-import requests
 yf_session = requests.Session()
 yf_session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
 
@@ -71,7 +70,15 @@ if not st.session_state.authenticated:
             st.error("You didn't say the magic word.")
     else:
         st.title("🔒 Access Required")
-        st.video("https://www.youtube.com/watch?v=RfiQYRn7fBg")
+        st.markdown(
+            """
+            <iframe width="560" height="315"
+            src="https://www.youtube.com/embed/RfiQYRn7fBg"
+            frameborder="0" allowfullscreen>
+            </iframe>
+            """,
+            unsafe_allow_html=True
+        )
         password_input = st.text_input("Enter password", type="password")
         if st.button("Enter"):
             if password_input == APP_PASSWORD:
@@ -277,7 +284,7 @@ def format_verdict(confidence_pct):
 @st.cache_data(ttl=3600)
 def get_quick_analysis(ticker):
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(ticker, session=yf_session)
         info = stock.info
         history = stock.history(period="5y")
         if history.empty:
@@ -307,7 +314,7 @@ def get_active_penny_stocks():
         results = []
         for ticker in PENNY_SEED:
             try:
-                info = yf.Ticker(ticker).info
+                info = yf.Ticker(ticker, session=yf_session).info
                 price = info.get("currentPrice", info.get("regularMarketPrice", 99))
                 volume = info.get("volume", 0)
                 if price and price < 5:
@@ -439,7 +446,7 @@ def show_my_watchlist():
         buy_price = position["buy_price"]
         shares = position["shares"]
         try:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(ticker, session=yf_session)
             info = stock.info
             current_price = info.get("currentPrice", info.get("regularMarketPrice", None))
             name = info.get("longName", ticker)
@@ -487,7 +494,7 @@ def show_detail(ticker):
         go_home()
         st.rerun()
 
-    stock = yf.Ticker(ticker)
+    stock = yf.Ticker(ticker, session=yf_session)
     info = stock.info
     name = info.get("longName", ticker)
     price = info.get("currentPrice", info.get("regularMarketPrice", "N/A"))
