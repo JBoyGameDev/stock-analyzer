@@ -285,14 +285,13 @@ def format_verdict(confidence_pct):
 def get_quick_analysis(ticker):
     try:
         stock = yf.Ticker(ticker, session=yf_session)
-        info = stock.info
+        fi = stock.fast_info
         history = stock.history(period="5y")
         if history.empty:
             return None
-        name = info.get("longName", ticker)
-        price = info.get("currentPrice", info.get("regularMarketPrice", "N/A"))
-        confidence_pct = compute_confidence(history, name)
-        return {"name": name, "price": price, "confidence": confidence_pct, "ticker": ticker}
+        price = round(fi.last_price, 2) if fi.last_price else "N/A"
+        confidence_pct = compute_confidence(history, ticker)
+        return {"name": ticker, "price": price, "confidence": confidence_pct, "ticker": ticker}
     except:
         return None
 
@@ -314,11 +313,11 @@ def get_active_penny_stocks():
         results = []
         for ticker in PENNY_SEED:
             try:
-                info = yf.Ticker(ticker, session=yf_session).info
-                price = info.get("currentPrice", info.get("regularMarketPrice", 99))
-                volume = info.get("volume", 0)
+                fi = yf.Ticker(ticker, session=yf_session).fast_info
+                price = fi.last_price
+                volume = fi.three_month_average_volume or 0
                 if price and price < 5:
-                    results.append({"ticker": ticker, "price": price, "volume": volume or 0})
+                    results.append({"ticker": ticker, "price": price, "volume": volume})
             except:
                 continue
         results.sort(key=lambda x: x["volume"], reverse=True)
@@ -447,9 +446,9 @@ def show_my_watchlist():
         shares = position["shares"]
         try:
             stock = yf.Ticker(ticker, session=yf_session)
-            info = stock.info
-            current_price = info.get("currentPrice", info.get("regularMarketPrice", None))
-            name = info.get("longName", ticker)
+            fi = stock.fast_info
+            current_price = round(fi.last_price, 2) if fi.last_price else None
+            name = ticker
             history = stock.history(period="5y")
 
             if current_price and not history.empty:
@@ -462,7 +461,7 @@ def show_my_watchlist():
                 with st.container(border=True):
                     col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
                     with col1:
-                        st.markdown(f"### {ticker} — {name}")
+                        st.markdown(f"### {ticker}")
                     with col2:
                         st.metric("Current Price", f"${round(current_price, 2)}")
                     with col3:
@@ -495,19 +494,18 @@ def show_detail(ticker):
         st.rerun()
 
     stock = yf.Ticker(ticker, session=yf_session)
-    info = stock.info
-    name = info.get("longName", ticker)
-    price = info.get("currentPrice", info.get("regularMarketPrice", "N/A"))
-    previous_close = info.get("previousClose", "N/A")
-    volume = info.get("volume", "N/A")
-    market_cap = info.get("marketCap", "N/A")
+    fi = stock.fast_info
+    price = round(fi.last_price, 2) if fi.last_price else "N/A"
+    previous_close = round(fi.previous_close, 2) if fi.previous_close else "N/A"
+    volume = fi.three_month_average_volume or "N/A"
+    market_cap = fi.market_cap or "N/A"
 
-    st.title(f"{name} ({ticker})")
+    st.title(f"{ticker}")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Current Price", f"${price}")
     col2.metric("Previous Close", f"${previous_close}")
-    col3.metric("Volume", f"{volume:,}" if isinstance(volume, int) else volume)
-    col4.metric("Market Cap", f"${market_cap:,}" if isinstance(market_cap, int) else market_cap)
+    col3.metric("Volume (3mo avg)", f"{int(volume):,}" if isinstance(volume, float) else volume)
+    col4.metric("Market Cap", f"${int(market_cap):,}" if isinstance(market_cap, float) else market_cap)
 
     history = stock.history(period="5y")
 
@@ -567,7 +565,7 @@ def show_detail(ticker):
         st.subheader("News & Sentiment")
         st.caption("Recent articles analyzed for positive, negative, or neutral financial sentiment.")
         with st.spinner("Fetching and analyzing articles..."):
-            articles, avg_sentiment = get_news_and_sentiment(name)
+            articles, avg_sentiment = get_news_and_sentiment(ticker)
         if avg_sentiment > 0.2:
             st.success("Overall news sentiment: POSITIVE 🟢")
         elif avg_sentiment < -0.2:
@@ -585,7 +583,7 @@ def show_detail(ticker):
         st.subheader("Final Score")
         st.caption("All signals combined into one directional score. You make the final call.")
         signals, tech_score = analyze_technicals(history)
-        _, avg_sentiment = get_news_and_sentiment(name, page_size=3)
+        _, avg_sentiment = get_news_and_sentiment(ticker, page_size=3)
         sentiment_score = round(avg_sentiment * 3)
         total_score = tech_score + sentiment_score
         confidence_pct = round((total_score / 8) * 100)
