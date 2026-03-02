@@ -12,7 +12,6 @@ from datetime import datetime
 
 load_dotenv()
 
-
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "password")
 
@@ -158,6 +157,30 @@ def analyze_timeframes(history, similar_pattern_indices):
             results[label] = None
     return results
 
+@st.cache_data(ttl=3600)
+def get_market_context():
+    try:
+        spy = yf.Ticker("SPY")
+        spy_hist = spy.history(period="3mo")
+        if spy_hist.empty:
+            return 0, "Market data unavailable"
+        spy_sma20 = spy_hist["Close"].tail(20).mean()
+        spy_sma50 = spy_hist["Close"].tail(50).mean()
+        spy_current = spy_hist["Close"].iloc[-1]
+        spy_change_1mo = ((spy_current - spy_hist["Close"].iloc[-21]) / spy_hist["Close"].iloc[-21]) * 100
+        if spy_current > spy_sma20 > spy_sma50 and spy_change_1mo > 2:
+            return 2, f"🟢 Broad market is in a strong uptrend (S&P 500 up {round(spy_change_1mo, 1)}% this month)"
+        elif spy_current > spy_sma20:
+            return 1, f"🟢 Broad market is trending upward (S&P 500 up {round(spy_change_1mo, 1)}% this month)"
+        elif spy_current < spy_sma20 < spy_sma50 and spy_change_1mo < -2:
+            return -2, f"🔴 Broad market is in a strong downtrend (S&P 500 down {round(abs(spy_change_1mo), 1)}% this month)"
+        elif spy_current < spy_sma20:
+            return -1, f"🔴 Broad market is trending downward (S&P 500 down {round(abs(spy_change_1mo), 1)}% this month)"
+        else:
+            return 0, f"🟡 Broad market is neutral (S&P 500 {round(spy_change_1mo, 1)}% this month)"
+    except:
+        return 0, "🟡 Market context unavailable"
+
 def analyze_technicals(history):
     signals = []
     score = 0
@@ -168,81 +191,141 @@ def analyze_technicals(history):
     h["MACD_signal"] = macd["MACDs_12_26_9"]
     h["SMA20"] = ta.sma(h["Close"], length=20)
     h["SMA50"] = ta.sma(h["Close"], length=50)
+    bb = ta.bbands(h["Close"], length=20)
+    h["BB_upper"] = bb["BBU_20_2.0"]
+    h["BB_lower"] = bb["BBL_20_2.0"]
+    h["OBV"] = ta.obv(h["Close"], h["Volume"])
+    h["WILLR"] = ta.willr(h["High"], h["Low"], h["Close"], length=14)
     latest = h.iloc[-1]
     current_price = latest["Close"]
+    week_high_52 = h["Close"].tail(252).max()
+    week_low_52 = h["Close"].tail(252).min()
 
     rsi = latest["RSI"]
     if pd.notna(rsi):
         if rsi < 30:
-            signals.append(("RSI", "🟢 Oversold — potential bounce incoming", "+"))
+            signals.append(("RSI", f"🟢 Oversold at {round(rsi, 1)} — historically precedes a recovery. Readings below 30 indicate selling may be exhausted.", "+", 1))
             score += 1
         elif rsi > 70:
-            signals.append(("RSI", "🔴 Overbought — potential pullback incoming", "-"))
+            signals.append(("RSI", f"🔴 Overbought at {round(rsi, 1)} — stock may be due for a pullback. Readings above 70 indicate buyers may be exhausted.", "-", 1))
             score -= 1
         else:
-            signals.append(("RSI", f"🟡 Neutral ({round(rsi, 1)})", "0"))
+            signals.append(("RSI", f"🟡 Neutral at {round(rsi, 1)} — no strong overbought or oversold signal.", "0", 1))
 
     if pd.notna(latest["MACD"]) and pd.notna(latest["MACD_signal"]):
         if latest["MACD"] > latest["MACD_signal"]:
-            signals.append(("MACD", "🟢 Bullish crossover — upward momentum", "+"))
+            signals.append(("MACD", "🟢 Bullish crossover — short-term momentum is accelerating upward. Most reliable when confirmed by volume.", "+", 1))
             score += 1
         else:
-            signals.append(("MACD", "🔴 Bearish crossover — downward momentum", "-"))
+            signals.append(("MACD", "🔴 Bearish crossover — short-term momentum is declining. Watch for reversal before considering a buy.", "-", 1))
             score -= 1
 
     if pd.notna(latest["SMA20"]) and pd.notna(latest["SMA50"]):
         if current_price > latest["SMA20"] > latest["SMA50"]:
-            signals.append(("Moving Averages", "🟢 Price above both averages — strong uptrend", "+"))
+            signals.append(("Moving Averages", "🟢 Price is above both the 20-day and 50-day averages — textbook uptrend structure.", "+", 2))
             score += 2
         elif current_price < latest["SMA20"] < latest["SMA50"]:
-            signals.append(("Moving Averages", "🔴 Price below both averages — strong downtrend", "-"))
+            signals.append(("Moving Averages", "🔴 Price is below both the 20-day and 50-day averages — textbook downtrend structure.", "-", 2))
             score -= 2
         else:
-            signals.append(("Moving Averages", "🟡 Mixed signals — no clear trend", "0"))
+            signals.append(("Moving Averages", "🟡 Price is between the averages — mixed structure, no confirmed trend direction.", "0", 2))
+
+    if pd.notna(latest["BB_upper"]) and pd.notna(latest["BB_lower"]):
+        bb_range = latest["BB_upper"] - latest["BB_lower"]
+        if bb_range > 0:
+            bb_position = (current_price - latest["BB_lower"]) / bb_range
+            if bb_position > 0.95:
+                signals.append(("Bollinger Bands", "🔴 Price is at the upper band — statistically expensive relative to recent volatility. High probability of mean reversion.", "-", 1))
+                score -= 1
+            elif bb_position < 0.05:
+                signals.append(("Bollinger Bands", "🟢 Price is at the lower band — statistically cheap relative to recent volatility. High probability of bounce.", "+", 1))
+                score += 1
+            else:
+                signals.append(("Bollinger Bands", f"🟡 Price is at {round(bb_position * 100)}% of the Bollinger Band range — within normal volatility bounds.", "0", 1))
+
+    obv_series = h["OBV"].dropna()
+    if len(obv_series) > 10:
+        obv_trend = obv_series.iloc[-1] - obv_series.iloc[-10]
+        price_trend = h["Close"].iloc[-1] - h["Close"].iloc[-10]
+        if obv_trend > 0 and price_trend > 0:
+            signals.append(("On-Balance Volume", "🟢 Volume is flowing in as price rises — buyers are committed. Confirms the upward move is real.", "+", 1))
+            score += 1
+        elif obv_trend < 0 and price_trend < 0:
+            signals.append(("On-Balance Volume", "🔴 Volume is flowing out as price falls — sellers are committed. Confirms the downward move is real.", "-", 1))
+            score -= 1
+        elif obv_trend > 0 and price_trend < 0:
+            signals.append(("On-Balance Volume", "🟢 Volume rising while price falls — buyers quietly accumulating. Often precedes a reversal upward.", "+", 1))
+            score += 1
+        else:
+            signals.append(("On-Balance Volume", "🟡 Volume and price not confirming each other — mixed signal.", "0", 1))
+
+    willr = latest["WILLR"]
+    if pd.notna(willr):
+        if willr < -80:
+            signals.append(("Williams %R", f"🟢 Deeply oversold at {round(willr, 1)} — strong bounce signal, complements RSI.", "+", 1))
+            score += 1
+        elif willr > -20:
+            signals.append(("Williams %R", f"🔴 Deeply overbought at {round(willr, 1)} — pullback signal, complements RSI.", "-", 1))
+            score -= 1
+        else:
+            signals.append(("Williams %R", f"🟡 Neutral at {round(willr, 1)} — no extreme signal.", "0", 1))
+
+    if week_high_52 > 0:
+        pct_from_high = ((current_price - week_high_52) / week_high_52) * 100
+        pct_from_low = ((current_price - week_low_52) / week_low_52) * 100
+        if pct_from_high > -5:
+            signals.append(("52-Week Range", f"🟢 Within 5% of 52-week high — strong long-term momentum. Breakouts above yearly highs often continue.", "+", 1))
+            score += 1
+        elif pct_from_low < 10:
+            signals.append(("52-Week Range", f"🔴 Near 52-week low (down {round(abs(pct_from_high), 1)}% from high) — significant long-term weakness.", "-", 1))
+            score -= 1
+        else:
+            signals.append(("52-Week Range", f"🟡 Mid-range (down {round(abs(pct_from_high), 1)}% from 52-week high) — no extreme positioning.", "0", 1))
 
     avg_volume = history["Volume"].tail(20).mean()
     latest_volume = latest["Volume"]
     if latest_volume > avg_volume * 1.5:
-        signals.append(("Volume", "🟢 High volume — strong market interest", "+"))
+        signals.append(("Volume", "🟢 Volume 50%+ above 20-day average — strong market interest. High-volume moves are more likely to continue.", "+", 1))
         score += 1
     elif latest_volume < avg_volume * 0.5:
-        signals.append(("Volume", "🔴 Low volume — weak market interest", "-"))
+        signals.append(("Volume", "🔴 Volume below normal — low conviction. Moves on low volume are more likely to reverse.", "-", 1))
         score -= 1
     else:
-        signals.append(("Volume", "🟡 Normal volume", "0"))
+        signals.append(("Volume", "🟡 Volume is normal — no unusual activity.", "0", 1))
 
     recent_prices = history["Close"].tail(20)
     price_change = (recent_prices.iloc[-1] - recent_prices.iloc[0]) / recent_prices.iloc[0] * 100
     if price_change > 5:
-        signals.append(("Price Trend (20 days)", f"🟢 Up {round(price_change, 1)}% over 20 days", "+"))
+        signals.append(("Price Trend (20 days)", f"🟢 Up {round(price_change, 1)}% over 20 trading days — sustained short-term momentum.", "+", 1))
         score += 1
     elif price_change < -5:
-        signals.append(("Price Trend (20 days)", f"🔴 Down {round(abs(price_change), 1)}% over 20 days", "-"))
+        signals.append(("Price Trend (20 days)", f"🔴 Down {round(abs(price_change), 1)}% over 20 trading days — sustained short-term weakness.", "-", 1))
         score -= 1
     else:
-        signals.append(("Price Trend (20 days)", f"🟡 Relatively flat ({round(price_change, 1)}%)", "0"))
+        signals.append(("Price Trend (20 days)", f"🟡 Relatively flat ({round(price_change, 1)}%) over 20 trading days.", "0", 1))
 
     return signals, score
 
-def get_news_and_sentiment(name, page_size=5):
+def get_news_and_sentiment(ticker, page_size=10):
     news_url = (
         f"https://newsapi.org/v2/everything?"
-        f"q={name}&sortBy=publishedAt&language=en&pageSize={page_size}&apiKey={NEWS_API_KEY}"
+        f"q={ticker}&sortBy=publishedAt&language=en&pageSize={page_size}&apiKey={NEWS_API_KEY}"
     )
     news_data = requests.get(news_url).json()
     articles_out = []
     sentiment_scores = []
     if news_data.get("articles"):
-        for article in news_data["articles"]:
+        for i, article in enumerate(news_data["articles"]):
             text = f"{article['title']}. {article.get('description', '')}"[:512]
             result = sentiment_model(text)[0]
             label = result["label"]
             score = result["score"]
+            recency_weight = 1.0 if i < 3 else 0.7
             if label == "positive":
-                sentiment_scores.append(1)
+                sentiment_scores.append(1 * recency_weight)
                 badge = "🟢 Positive"
             elif label == "negative":
-                sentiment_scores.append(-1)
+                sentiment_scores.append(-1 * recency_weight)
                 badge = "🔴 Negative"
             else:
                 sentiment_scores.append(0)
@@ -258,13 +341,35 @@ def get_news_and_sentiment(name, page_size=5):
     avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
     return articles_out, avg_sentiment
 
-def compute_confidence(history, name):
-    _, tech_score = analyze_technicals(history)
-    _, avg_sentiment = get_news_and_sentiment(name, page_size=3)
+def compute_full_analysis(history, ticker):
+    signals, tech_score = analyze_technicals(history)
+    articles, avg_sentiment = get_news_and_sentiment(ticker, page_size=10)
+    market_score, market_description = get_market_context()
     sentiment_score = round(avg_sentiment * 3)
-    total_score = tech_score + sentiment_score
-    confidence_pct = round((total_score / 8) * 100)
-    return max(-100, min(100, confidence_pct))
+    market_weight = market_score * 2
+    raw_total = tech_score + sentiment_score + market_weight
+    max_possible = 18
+    confidence_pct = round((raw_total / max_possible) * 100)
+    confidence_pct = max(-100, min(100, confidence_pct))
+    top_signals = []
+    for s in signals:
+        pos_count = len([x for x in top_signals if x[2] == "+"])
+        neg_count = len([x for x in top_signals if x[2] == "-"])
+        if s[2] == "+" and pos_count < 2:
+            top_signals.append(s)
+        elif s[2] == "-" and neg_count < 1:
+            top_signals.append(s)
+    return {
+        "signals": signals,
+        "tech_score": tech_score,
+        "articles": articles,
+        "avg_sentiment": avg_sentiment,
+        "sentiment_score": sentiment_score,
+        "market_score": market_score,
+        "market_description": market_description,
+        "confidence_pct": confidence_pct,
+        "top_signals": top_signals
+    }
 
 def format_verdict(confidence_pct):
     abs_conf = abs(confidence_pct)
@@ -279,6 +384,39 @@ def format_verdict(confidence_pct):
         return "➡️ UNCLEAR", "Low", abs_conf, "🟡"
     return f"{direction}", rating, abs_conf, "🟢" if confidence_pct >= 0 else "🔴"
 
+def render_confidence_gauge(confidence_pct):
+    abs_conf = abs(confidence_pct)
+    direction, rating, _, _ = format_verdict(confidence_pct)
+    if confidence_pct >= 20:
+        color = "#28a745"
+    elif confidence_pct <= -20:
+        color = "#dc3545"
+    else:
+        color = "#ffc107"
+    st.markdown(
+        f"""
+        <div style="margin: 10px 0;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-weight: bold; font-size: 16px;">{direction} — {rating}</span>
+                <span style="font-weight: bold; font-size: 16px; color: {color};">{abs_conf}%</span>
+            </div>
+            <div style="background-color: #e9ecef; border-radius: 8px; height: 20px; overflow: hidden;">
+                <div style="
+                    width: {abs_conf}%;
+                    background-color: {color};
+                    height: 100%;
+                    border-radius: 8px;
+                "></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-top: 2px;">
+                <span style="font-size: 11px; color: #888;">0%</span>
+                <span style="font-size: 11px; color: #888;">100%</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 @st.cache_data(ttl=3600)
 def get_quick_analysis(ticker):
     try:
@@ -287,8 +425,14 @@ def get_quick_analysis(ticker):
         if history.empty:
             return None
         price = round(history["Close"].iloc[-1], 2)
-        confidence_pct = compute_confidence(history, ticker)
-        return {"name": ticker, "price": price, "confidence": confidence_pct, "ticker": ticker}
+        analysis = compute_full_analysis(history, ticker)
+        return {
+            "name": ticker,
+            "price": price,
+            "confidence": analysis["confidence_pct"],
+            "ticker": ticker,
+            "updated": datetime.now().strftime("%H:%M")
+        }
     except:
         return None
 
@@ -333,7 +477,7 @@ def get_buy_hold_sell(confidence, gain_loss_pct, signals):
         reasons.append(f"Strong bullish signal at {confidence}% confidence")
         reasons.append(f"Position is up {round(gain_loss_pct, 1)}% — momentum is in your favor")
         if positive_signals:
-            reasons.append(f"Supporting signals: {', '.join([s[0] for s in positive_signals])}")
+            reasons.append(f"Supporting signals: {', '.join([s[0] for s in positive_signals[:3]])}")
     elif confidence >= 50 and gain_loss_pct < 0:
         verdict = "🟡 HOLD"
         reasons.append(f"Analysis is bullish at {confidence}% — recovery is indicated")
@@ -343,7 +487,7 @@ def get_buy_hold_sell(confidence, gain_loss_pct, signals):
         verdict = "🔴 SELL"
         reasons.append(f"Strong bearish signal at {abs(confidence)}% confidence")
         if negative_signals:
-            reasons.append(f"Warning signals: {', '.join([s[0] for s in negative_signals])}")
+            reasons.append(f"Warning signals: {', '.join([s[0] for s in negative_signals[:3]])}")
         if gain_loss_pct < 0:
             reasons.append(f"Position already down {round(abs(gain_loss_pct), 1)}% — further decline indicated")
         else:
@@ -365,13 +509,11 @@ def get_buy_hold_sell(confidence, gain_loss_pct, signals):
 def render_stock_card(data, section_key):
     if not data:
         return
-    direction, rating, abs_conf, color = format_verdict(data["confidence"])
     with st.container(border=True):
         st.markdown(f"### {data['ticker']}")
-        st.write(f"**{data['name']}**")
         st.write(f"Price: **${data['price']}**")
-        st.markdown(f"**Algorithmic outlook:** {direction} — {rating} ({abs_conf}%)")
-        st.caption("Based on technical indicators and recent news sentiment.")
+        render_confidence_gauge(data["confidence"])
+        st.caption(f"Based on 9 technical signals, news sentiment, and market context. Updated {data.get('updated', 'recently')}.")
         if st.button("Full Analysis →", key=f"{section_key}_{data['ticker']}"):
             go_to_detail(data["ticker"])
             st.rerun()
@@ -387,6 +529,14 @@ def show_home():
         if st.button("Analyze →", use_container_width=True) and search_input:
             go_to_detail(search_input)
             st.rerun()
+
+    market_score, market_description = get_market_context()
+    if market_score >= 1:
+        st.success(f"**Market Context:** {market_description}")
+    elif market_score <= -1:
+        st.error(f"**Market Context:** {market_description}")
+    else:
+        st.warning(f"**Market Context:** {market_description}")
 
     st.markdown("---")
     st.subheader("🔥 Trending Now")
@@ -450,42 +600,39 @@ def show_my_watchlist():
                 st.warning(f"Could not load data for {ticker}")
                 continue
             current_price = round(history["Close"].iloc[-1], 2)
-            name = ticker
+            gain_loss_pct = ((current_price - buy_price) / buy_price) * 100
+            gain_loss_dollar = (current_price - buy_price) * shares
+            analysis = compute_full_analysis(history, ticker)
+            signals = analysis["signals"]
+            confidence = analysis["confidence_pct"]
+            verdict, reasons = get_buy_hold_sell(confidence, gain_loss_pct, signals)
 
-            if not history.empty:
-                gain_loss_pct = ((current_price - buy_price) / buy_price) * 100
-                gain_loss_dollar = (current_price - buy_price) * shares
-                signals, _ = analyze_technicals(history)
-                confidence = compute_confidence(history, name)
-                verdict, reasons = get_buy_hold_sell(confidence, gain_loss_pct, signals)
+            with st.container(border=True):
+                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                with col1:
+                    st.markdown(f"### {ticker}")
+                with col2:
+                    st.metric("Current Price", f"${round(current_price, 2)}")
+                with col3:
+                    st.metric("Buy Price", f"${round(buy_price, 2)}")
+                with col4:
+                    st.metric("Your Gain / Loss", f"${round(gain_loss_dollar, 2)}", f"{round(gain_loss_pct, 1)}%")
 
-                with st.container(border=True):
-                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-                    with col1:
-                        st.markdown(f"### {ticker}")
-                    with col2:
-                        st.metric("Current Price", f"${round(current_price, 2)}")
-                    with col3:
-                        st.metric("Buy Price", f"${round(buy_price, 2)}")
-                    with col4:
-                        st.metric("Your Gain / Loss", f"${round(gain_loss_dollar, 2)}", f"{round(gain_loss_pct, 1)}%")
+                render_confidence_gauge(confidence)
+                st.markdown(f"## {verdict}")
+                for reason in reasons:
+                    st.write(f"• {reason}")
 
-                    st.markdown(f"## {verdict}")
-                    for reason in reasons:
-                        st.write(f"• {reason}")
-
-                    col_a, col_b = st.columns([1, 4])
-                    with col_a:
-                        if st.button("Full Analysis", key=f"detail_{ticker}_{i}"):
-                            go_to_detail(ticker)
-                            st.rerun()
-                    with col_b:
-                        if st.button("Remove Position", key=f"remove_{ticker}_{i}"):
-                            my_list.pop(i)
-                            save_my_watchlist(my_list)
-                            st.rerun()
-            else:
-                st.warning(f"Could not load data for {ticker}")
+                col_a, col_b = st.columns([1, 4])
+                with col_a:
+                    if st.button("Full Analysis", key=f"detail_{ticker}_{i}"):
+                        go_to_detail(ticker)
+                        st.rerun()
+                with col_b:
+                    if st.button("Remove Position", key=f"remove_{ticker}_{i}"):
+                        my_list.pop(i)
+                        save_my_watchlist(my_list)
+                        st.rerun()
         except Exception as e:
             st.warning(f"Error loading {ticker}: {str(e)}")
 
@@ -499,21 +646,40 @@ def show_detail(ticker):
     price = round(history["Close"].iloc[-1], 2) if not history.empty else "N/A"
     previous_close = round(history["Close"].iloc[-2], 2) if len(history) > 1 else "N/A"
     volume = int(history["Volume"].iloc[-1]) if not history.empty else "N/A"
-    market_cap = "N/A"
 
     st.title(f"{ticker}")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     col1.metric("Current Price", f"${price}")
     col2.metric("Previous Close", f"${previous_close}")
     col3.metric("Volume", f"{volume:,}" if isinstance(volume, int) else volume)
-    col4.metric("Market Cap", market_cap)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    with st.spinner("Running full analysis..."):
+        analysis = compute_full_analysis(history, ticker)
+
+    confidence_pct = analysis["confidence_pct"]
+
+    st.markdown("---")
+    st.subheader("📋 Algorithmic Verdict")
+    render_confidence_gauge(confidence_pct)
+
+    if analysis["market_score"] >= 1:
+        st.success(f"**Market Context:** {analysis['market_description']}")
+    elif analysis["market_score"] <= -1:
+        st.error(f"**Market Context:** {analysis['market_description']}")
+    else:
+        st.warning(f"**Market Context:** {analysis['market_description']}")
+
+    st.markdown("**What's driving this signal:**")
+    for s in analysis["top_signals"]:
+        st.write(f"• {s[1]}")
+
+    st.markdown("---")
+
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📈 Chart",
         "📊 Technical Analysis",
         "🔁 Historical Patterns",
-        "📰 News & Sentiment",
-        "📋 Final Score"
+        "📰 News & Sentiment"
     ])
 
     with tab1:
@@ -524,27 +690,28 @@ def show_detail(ticker):
 
     with tab2:
         st.subheader("Technical Indicators")
-        st.caption("Each row is one signal the algorithm evaluated. Click to see what it means.")
-        signals, _ = analyze_technicals(history)
-        for indicator, description, direction in signals:
+        st.caption("9 signals evaluated. Click any indicator to see what it means and why it matters.")
+        positive_count = sum(1 for s in analysis["signals"] if s[2] == "+")
+        negative_count = sum(1 for s in analysis["signals"] if s[2] == "-")
+        neutral_count = sum(1 for s in analysis["signals"] if s[2] == "0")
+        st.write(f"🟢 {positive_count} bullish &nbsp;&nbsp; 🔴 {negative_count} bearish &nbsp;&nbsp; 🟡 {neutral_count} neutral")
+        st.markdown("---")
+        for indicator, description, direction, weight in analysis["signals"]:
             with st.expander(f"{indicator}"):
                 st.write(description)
+                if weight > 1:
+                    st.caption("⚡ High-weight signal — this indicator has double impact on the final score.")
 
     with tab3:
         st.subheader("Historical Pattern Matching")
         st.caption("The algorithm found the 5 most similar 30-day price shapes in the last 5 years and recorded what happened after each one.")
         reliability_note = {
-            "Today": "High",
-            "This Week": "High",
-            "This Month": "Moderate",
-            "3 Months": "Moderate",
-            "6 Months": "Lower",
-            "1 Year+": "Lowest"
+            "Today": "High", "This Week": "High", "This Month": "Moderate",
+            "3 Months": "Moderate", "6 Months": "Lower", "1 Year+": "Lowest"
         }
         with st.spinner("Scanning 5 years of history for similar patterns..."):
             similar = find_similar_patterns(history)
             timeframe_results = analyze_timeframes(history, similar)
-
         cols = st.columns(3)
         for idx, (label, data) in enumerate(timeframe_results.items()):
             with cols[idx % 3]:
@@ -552,8 +719,8 @@ def show_detail(ticker):
                     st.markdown(f"**{label}**")
                     st.caption(f"Reliability: {reliability_note[label]}")
                     if data:
-                        direction = "📈 UP" if data["avg_change"] > 0 else "📉 DOWN"
-                        st.markdown(f"### {direction}")
+                        direction_label = "📈 UP" if data["avg_change"] > 0 else "📉 DOWN"
+                        st.markdown(f"### {direction_label}")
                         st.write(f"Avg change: **{data['avg_change']}%**")
                         st.write(f"Went up in **{data['positive_rate']}%** of past cases")
                         st.caption(f"Based on {data['sample_size']} similar situations")
@@ -562,9 +729,8 @@ def show_detail(ticker):
 
     with tab4:
         st.subheader("News & Sentiment")
-        st.caption("Recent articles analyzed for positive, negative, or neutral financial sentiment.")
-        with st.spinner("Fetching and analyzing articles..."):
-            articles, avg_sentiment = get_news_and_sentiment(ticker)
+        st.caption("10 most recent articles analyzed. Recent articles weighted more heavily in the score.")
+        avg_sentiment = analysis["avg_sentiment"]
         if avg_sentiment > 0.2:
             st.success("Overall news sentiment: POSITIVE 🟢")
         elif avg_sentiment < -0.2:
@@ -572,34 +738,11 @@ def show_detail(ticker):
         else:
             st.warning("Overall news sentiment: NEUTRAL 🟡")
         st.markdown("---")
-        for article in articles:
+        for article in analysis["articles"]:
             with st.expander(f"{article['badge']} {article['title']}"):
                 st.caption(f"{article['source']} — {article['date']}")
                 st.write(article["description"])
                 st.write(f"Sentiment confidence: **{article['confidence']}%**")
-
-    with tab5:
-        st.subheader("Final Score")
-        st.caption("All signals combined into one directional score. You make the final call.")
-        signals, tech_score = analyze_technicals(history)
-        _, avg_sentiment = get_news_and_sentiment(ticker, page_size=3)
-        sentiment_score = round(avg_sentiment * 3)
-        total_score = tech_score + sentiment_score
-        confidence_pct = round((total_score / 8) * 100)
-        confidence_pct = max(-100, min(100, confidence_pct))
-
-        direction, rating, abs_conf, color = format_verdict(confidence_pct)
-
-        if color == "🟢":
-            st.success(f"{direction} — {rating} ({abs_conf}%)")
-        elif color == "🔴":
-            st.error(f"{direction} — {rating} ({abs_conf}%)")
-        else:
-            st.warning(f"{direction} — {rating} ({abs_conf}%)")
-
-        st.metric("Confidence Score", f"{abs_conf}%")
-        st.write(f"**Signal strength: {rating}**")
-        st.caption("This tool presents data and reasoning only. The final decision is yours.")
 
 st.sidebar.title("Navigation")
 if st.sidebar.button("🏠 Home", use_container_width=True):
