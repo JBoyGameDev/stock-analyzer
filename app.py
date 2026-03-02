@@ -11,6 +11,11 @@ from transformers import pipeline
 from datetime import datetime
 
 load_dotenv()
+
+import requests
+yf_session = requests.Session()
+yf_session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "password")
 
