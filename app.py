@@ -285,11 +285,10 @@ def format_verdict(confidence_pct):
 def get_quick_analysis(ticker):
     try:
         stock = yf.Ticker(ticker, session=yf_session)
-        fi = stock.fast_info
         history = stock.history(period="5y")
         if history.empty:
             return None
-        price = round(fi.last_price, 2) if fi.last_price else "N/A"
+        price = round(history["Close"].iloc[-1], 2)
         confidence_pct = compute_confidence(history, ticker)
         return {"name": ticker, "price": price, "confidence": confidence_pct, "ticker": ticker}
     except:
@@ -313,9 +312,11 @@ def get_active_penny_stocks():
         results = []
         for ticker in PENNY_SEED:
             try:
-                fi = yf.Ticker(ticker, session=yf_session).fast_info
-                price = fi.last_price
-                volume = fi.three_month_average_volume or 0
+                history = yf.Ticker(ticker, session=yf_session).history(period="1mo")
+                if history.empty:
+                    continue
+                price = history["Close"].iloc[-1]
+                volume = history["Volume"].mean()
                 if price and price < 5:
                     results.append({"ticker": ticker, "price": price, "volume": volume})
             except:
@@ -446,12 +447,14 @@ def show_my_watchlist():
         shares = position["shares"]
         try:
             stock = yf.Ticker(ticker, session=yf_session)
-            fi = stock.fast_info
-            current_price = round(fi.last_price, 2) if fi.last_price else None
-            name = ticker
             history = stock.history(period="5y")
+            if history.empty:
+                st.warning(f"Could not load data for {ticker}")
+                continue
+            current_price = round(history["Close"].iloc[-1], 2)
+            name = ticker
 
-            if current_price and not history.empty:
+            if not history.empty:
                 gain_loss_pct = ((current_price - buy_price) / buy_price) * 100
                 gain_loss_dollar = (current_price - buy_price) * shares
                 signals, _ = analyze_technicals(history)
@@ -494,20 +497,18 @@ def show_detail(ticker):
         st.rerun()
 
     stock = yf.Ticker(ticker, session=yf_session)
-    fi = stock.fast_info
-    price = round(fi.last_price, 2) if fi.last_price else "N/A"
-    previous_close = round(fi.previous_close, 2) if fi.previous_close else "N/A"
-    volume = fi.three_month_average_volume or "N/A"
-    market_cap = fi.market_cap or "N/A"
+    history = stock.history(period="5y")
+    price = round(history["Close"].iloc[-1], 2) if not history.empty else "N/A"
+    previous_close = round(history["Close"].iloc[-2], 2) if len(history) > 1 else "N/A"
+    volume = int(history["Volume"].iloc[-1]) if not history.empty else "N/A"
+    market_cap = "N/A"
 
     st.title(f"{ticker}")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Current Price", f"${price}")
     col2.metric("Previous Close", f"${previous_close}")
-    col3.metric("Volume (3mo avg)", f"{int(volume):,}" if isinstance(volume, float) else volume)
-    col4.metric("Market Cap", f"${int(market_cap):,}" if isinstance(market_cap, float) else market_cap)
-
-    history = stock.history(period="5y")
+    col3.metric("Volume", f"{volume:,}" if isinstance(volume, int) else volume)
+    col4.metric("Market Cap", market_cap)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📈 Chart",
