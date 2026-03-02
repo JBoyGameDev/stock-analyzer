@@ -12,8 +12,6 @@ from datetime import datetime
 
 load_dotenv()
 
-yf_session = requests.Session()
-yf_session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "password")
@@ -284,7 +282,7 @@ def format_verdict(confidence_pct):
 @st.cache_data(ttl=3600)
 def get_quick_analysis(ticker):
     try:
-        stock = yf.Ticker(ticker, session=yf_session)
+        stock = yf.Ticker(ticker)
         history = stock.history(period="5y")
         if history.empty:
             return None
@@ -312,7 +310,7 @@ def get_active_penny_stocks():
         results = []
         for ticker in PENNY_SEED:
             try:
-                history = yf.Ticker(ticker, session=yf_session).history(period="1mo")
+                history = yf.Ticker(ticker).history(period="1mo")
                 if history.empty:
                     continue
                 price = history["Close"].iloc[-1]
@@ -446,7 +444,7 @@ def show_my_watchlist():
         buy_price = position["buy_price"]
         shares = position["shares"]
         try:
-            stock = yf.Ticker(ticker, session=yf_session)
+            stock = yf.Ticker(ticker)
             history = stock.history(period="5y")
             if history.empty:
                 st.warning(f"Could not load data for {ticker}")
@@ -496,7 +494,7 @@ def show_detail(ticker):
         go_home()
         st.rerun()
 
-    stock = yf.Ticker(ticker, session=yf_session)
+    stock = yf.Ticker(ticker)
     history = stock.history(period="5y")
     price = round(history["Close"].iloc[-1], 2) if not history.empty else "N/A"
     previous_close = round(history["Close"].iloc[-2], 2) if len(history) > 1 else "N/A"
